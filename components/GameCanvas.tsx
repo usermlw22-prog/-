@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Camera, Entity, EntityType, GameState, Particle, Vector, Difficulty } from '../types';
 import { PhysicsEngine } from '../services/PhysicsEngine';
 import { AudioEngine } from '../services/AudioEngine';
-import { COLORS, PLAYER_RADIUS, PARTICLE_COLORS, AI_SPAWN_INTERVAL, GAME_DURATION, ZONE_DEVIL_RADIUS, ZONE_RESTRICTED_RADIUS } from '../constants';
+import { COLORS, PLAYER_RADIUS, PARTICLE_COLORS, AI_SPAWN_INTERVAL, GAME_DURATION, ZONE_DEVIL_RADIUS, ZONE_RESTRICTED_RADIUS, SHIELD_DURATION, SHIELD_COOLDOWN } from '../constants';
 
 const CHUNK_RENDER_DISTANCE = 1500; // Pixels
 const SPAWN_DISTANCE = 800; // Grid unit for generating map
@@ -11,6 +11,8 @@ const PHYSICS_SUBSTEPS = 4; // Number of physics steps per frame for stability
 export const GameCanvas: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>(0);
+  const frameCountRef = useRef<number>(0); // Track frames for throttling expensive ops
+  
   const [score, setScore] = useState(0);
   const [combo, setCombo] = useState(1);
   const [hintVisible, setHintVisible] = useState(true);
@@ -22,8 +24,11 @@ export const GameCanvas: React.FC = () => {
   const [finalTime, setFinalTime] = useState(0); // Store time taken
   const [difficulty, setDifficultyState] = useState(Difficulty.NORMAL);
   const [zoneAlert, setZoneAlert] = useState<{msg: string, color: string} | null>(null);
+  const [shieldCooldownRatio, setShieldCooldownRatio] = useState(0); // 0 to 1
+  const [brakingActive, setBrakingActive] = useState(false); // UI State
   
   const lastSecond = useRef<number>(Math.floor(GAME_DURATION / 1000));
+  const lastDistUpdate = useRef<number>(0); // Throttle distance UI updates
   
   // Zone tracking refs to trigger alerts only on entry
   const inDevilZoneRef = useRef(false);
@@ -59,6 +64,12 @@ export const GameCanvas: React.FC = () => {
     startTime: Date.now(),
     lastAiSpawnTime: 0,
     difficulty: Difficulty.NORMAL,
+    shieldActive: false,
+    shieldExpiresAt: 0,
+    shieldCooldownEndsAt: 0,
+    shieldBlockTime: 0,
+    braking: false,
+    brakeEndTime: 0,
   });
 
   const camera = useRef<Camera>({ x: 0, y: -200, zoom: 1 });
@@ -70,6 +81,28 @@ export const GameCanvas: React.FC = () => {
     const s = seconds % 60;
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
+
+  const activateShield = useCallback(() => {
+    const s = state.current;
+    const now = Date.now();
+    if (s.shieldCooldownEndsAt > now || s.paused || s.won || s.lost) return;
+
+    s.shieldActive = true;
+    s.shieldExpiresAt = now + SHIELD_DURATION;
+    s.shieldCooldownEndsAt = now + SHIELD_COOLDOWN;
+    AudioEngine.playShieldActivate();
+  }, []);
+
+  const activateBrake = useCallback(() => {
+    const s = state.current;
+    if (s.braking || s.paused || s.won || s.lost) return;
+    
+    s.braking = true;
+    s.brakeEndTime = Date.now() + 1000;
+    setBrakingActive(true);
+    // Initial gas burst sound could go here
+    if (typeof navigator.vibrate === 'function') navigator.vibrate([20, 20, 20]);
+  }, []);
 
   const togglePause = useCallback(() => {
     const s = state.current;
@@ -83,6 +116,11 @@ export const GameCanvas: React.FC = () => {
         // Adjust timers so time doesn't jump
         s.startTime += diff;
         s.lastAiSpawnTime += diff;
+        s.shieldExpiresAt += diff;
+        s.shieldCooldownEndsAt += diff;
+        s.shieldBlockTime += diff;
+        s.brakeEndTime += diff;
+        
         s.entities.forEach(e => {
             if (e.expiresAt) e.expiresAt += diff;
             if (e.activationTime) e.activationTime += diff;
@@ -103,6 +141,38 @@ export const GameCanvas: React.FC = () => {
     }
   }, []);
 
+  const initializeWorld = useCallback(() => {
+    PhysicsEngine.clearChunks(); // Force clear generation history
+    const initialEntities: Entity[] = [];
+    const currentDiff = state.current.difficulty;
+
+    // Expanded initial generation radius from 1 to 2 to cover more screen area
+    for (let x = -2; x <= 2; x++) {
+      for (let y = -2; y <= 2; y++) {
+         initialEntities.push(...PhysicsEngine.generateChunk(x, y, SPAWN_DISTANCE, currentDiff));
+      }
+    }
+    
+    // Add floor
+    initialEntities.push({
+        id: 'floor',
+        type: EntityType.WALL,
+        pos: { x: 0, y: 500 },
+        vel: {x:0, y:0},
+        radius: 0,
+        width: 6000, 
+        height: 100,
+        rotation: 0,
+        color: COLORS.wall,
+        mass: Infinity,
+        restitution: 0.5,
+        static: true,
+        persistent: true
+    });
+
+    state.current.entities = initialEntities;
+  }, []);
+
   const resetGame = () => {
       state.current.player.vel = {x:0, y:0};
       state.current.player.pos = {x:0, y:-200};
@@ -111,9 +181,17 @@ export const GameCanvas: React.FC = () => {
       state.current.paused = false;
       state.current.pauseStartTime = undefined;
       state.current.score = 0;
-      state.current.entities = state.current.entities.filter(e => !e.isAiGenerated && e.type !== EntityType.BEAM); // Clear AI walls and beams
+      state.current.shieldActive = false;
+      state.current.shieldExpiresAt = 0;
+      state.current.shieldCooldownEndsAt = 0;
+      state.current.shieldBlockTime = 0;
+      state.current.braking = false;
+      state.current.brakeEndTime = 0;
+      
+      // Full world reset
       state.current.lastAiSpawnTime = 0;
       state.current.startTime = Date.now();
+      initializeWorld(); // Regenerate world
       
       setWon(false);
       setLost(false);
@@ -122,6 +200,8 @@ export const GameCanvas: React.FC = () => {
       setScore(0);
       setTimeStr("5:00");
       setZoneAlert(null);
+      setShieldCooldownRatio(0);
+      setBrakingActive(false);
       inDevilZoneRef.current = false;
       inRestrictedZoneRef.current = false;
       lastSecond.current = Math.floor(GAME_DURATION / 1000);
@@ -146,44 +226,26 @@ export const GameCanvas: React.FC = () => {
   // Keyboard Listeners
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-        if (e.key.toLowerCase() === 'p') {
+        const key = e.key.toLowerCase();
+        if (key === 'p') {
             togglePause();
+        }
+        if (key === 'o') {
+            activateShield();
+        }
+        if (key === 'i') {
+            activateBrake();
         }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [togglePause]);
+  }, [togglePause, activateShield, activateBrake]);
 
   // Initialize Map
   useEffect(() => {
-    PhysicsEngine.generatedChunks.clear(); // Reset chunks on mount just in case
-    const initialEntities: Entity[] = [];
-    // Expanded initial generation radius from 1 to 2 to cover more screen area
-    for (let x = -2; x <= 2; x++) {
-      for (let y = -2; y <= 2; y++) {
-         initialEntities.push(...PhysicsEngine.generateChunk(x, y, SPAWN_DISTANCE));
-      }
-    }
-    
-    // Add floor
-    initialEntities.push({
-        id: 'floor',
-        type: EntityType.WALL,
-        pos: { x: 0, y: 500 },
-        vel: {x:0, y:0},
-        radius: 0,
-        width: 6000, // Increased width to match new spawn area
-        height: 100,
-        rotation: 0,
-        color: COLORS.wall,
-        mass: Infinity,
-        restitution: 0.5,
-        static: true
-    });
-
-    state.current.entities = initialEntities;
+    initializeWorld();
     AudioEngine.init();
-  }, []);
+  }, [initializeWorld]);
 
   // --- Input Handlers ---
   const handleInputStart = (x: number, y: number) => {
@@ -211,8 +273,9 @@ export const GameCanvas: React.FC = () => {
       const dx = dragStart.current.x - x;
       const dy = dragStart.current.y - y;
       
-      const power = 0.15;
-      const maxImpulse = 25;
+      // Increased power by 10% (0.15 -> 0.165, 25 -> 27.5)
+      const power = 0.165; 
+      const maxImpulse = 27.5;
       const impulseX = Math.min(Math.max(dx * power, -maxImpulse), maxImpulse);
       const impulseY = Math.min(Math.max(dy * power, -maxImpulse), maxImpulse);
 
@@ -240,7 +303,84 @@ export const GameCanvas: React.FC = () => {
     
     if (s.paused || s.won || s.lost) return;
 
+    frameCountRef.current++;
     const now = Date.now();
+
+    // Shield Logic
+    if (s.shieldActive && now > s.shieldExpiresAt) {
+        s.shieldActive = false;
+    }
+    // Shield Cooldown UI
+    if (s.shieldCooldownEndsAt > now) {
+        setShieldCooldownRatio((s.shieldCooldownEndsAt - now) / SHIELD_COOLDOWN);
+    } else {
+        setShieldCooldownRatio(0);
+    }
+
+    // Braking Ability Logic (Gas Spray)
+    if (s.braking) {
+        if (now > s.brakeEndTime) {
+            s.braking = false;
+            setBrakingActive(false);
+            s.player.vel = { x: 0, y: 0 }; // Final stop
+        } else {
+            // Apply heavy damping
+            s.player.vel.x *= 0.92; 
+            s.player.vel.y *= 0.92;
+            
+            // Visual Gas Spray
+            for (let i = 0; i < 2; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const speed = Math.random() * 3 + 2;
+                s.particles.push({
+                    id: `gas_${now}_${i}`,
+                    pos: { x: s.player.pos.x, y: s.player.pos.y },
+                    vel: { x: Math.cos(angle) * speed, y: Math.sin(angle) * speed },
+                    life: 0.6,
+                    maxLife: 0.6,
+                    color: '#e2e8f0', // Slate 200 (White smoke)
+                    size: Math.random() * 4 + 2
+                });
+            }
+        }
+    }
+
+    // Ball Trail Logic
+    const speed = Math.hypot(s.player.vel.x, s.player.vel.y);
+    if (speed > 5) {
+        // Double Helix / Circular Orbit Trail Effect
+        const dirX = s.player.vel.x / speed;
+        const dirY = s.player.vel.y / speed;
+        const perpX = -dirY;
+        const perpY = dirX;
+        
+        // Spawn 2 particles per frame for the double strand effect
+        for(let i=0; i<2; i++) {
+            const t = now * 0.02 + (i * Math.PI); // Time based phase, PI offset for opposite side
+            
+            // Narrower radius: player.radius * 0.6 for tight spiral
+            const offset = Math.sin(t) * (s.player.radius * 0.6); 
+            
+            // Depth effect (simulated 3D size modulation)
+            const depth = Math.cos(t);
+            const size = 1.5 + (depth + 1) * 1.2; // Slightly smaller base size
+            
+            // Calculate spawn position relative to ball
+            const spawnX = s.player.pos.x + perpX * offset;
+            const spawnY = s.player.pos.y + perpY * offset;
+
+            s.particles.push({
+                id: `trail_${now}_${i}`,
+                pos: { x: spawnX, y: spawnY },
+                vel: { x: 0, y: 0 }, // Stationary in world space to form a trail behind
+                life: 0.4,
+                maxLife: 0.4,
+                // Pure white, increased base opacity for better visibility (0.5 to 0.9)
+                color: `rgba(255, 255, 255, ${0.5 + (depth + 1) * 0.2})`, 
+                size: size
+            });
+        }
+    }
 
     // Time Logic
     if (hintVisible) {
@@ -270,7 +410,11 @@ export const GameCanvas: React.FC = () => {
 
     // Calc distance raw (physics units)
     const distRaw = PhysicsEngine.dist(s.player.pos, PhysicsEngine.GOAL_POS);
-    setDistanceToGoal(Math.floor(distRaw / 10));
+    // Throttle UI update for distance (Performance Optimization)
+    if (now - lastDistUpdate.current > 100) { // Update every 100ms
+        setDistanceToGoal(Math.floor(distRaw / 10));
+        lastDistUpdate.current = now;
+    }
 
     // --- Hard Mode Zones Logic ---
     let currentSpawnInterval = AI_SPAWN_INTERVAL;
@@ -328,34 +472,41 @@ export const GameCanvas: React.FC = () => {
         }
     }
 
-    // Cleanup Expired AI Entities
-    s.entities = s.entities.filter(e => {
-        if (e.expiresAt && e.expiresAt < now) {
-            s.particles.push(...PhysicsEngine.createExplosion(e.pos, 5, e.color));
-            return false;
+    // Cleanup Expired AI Entities (Throttle to run every 60 frames ~ 1 sec)
+    if (frameCountRef.current % 60 === 0) {
+        s.entities = s.entities.filter(e => {
+            if (e.expiresAt && e.expiresAt < now) {
+                // Don't spawn explosion here to save performance on mass expiration
+                return false;
+            }
+            return true;
+        });
+
+        // Prune distant chunk keys to allow regeneration if visited again (solves "disappearing world" bug)
+        PhysicsEngine.pruneChunks(s.player.pos, SPAWN_DISTANCE, CHUNK_RENDER_DISTANCE * 2);
+
+        // Limit total entity count to avoid memory leaks
+        if (s.entities.length > 400) {
+           s.entities = s.entities.filter(e => 
+               e.persistent || 
+               e.isAiGenerated || 
+               e.type === EntityType.BEAM ||
+               PhysicsEngine.dist(s.player.pos, e.pos) < CHUNK_RENDER_DISTANCE * 2
+           );
         }
-        return true;
-    });
+    }
 
     // 1. Procedural Generation
     const chunkX = Math.floor(s.player.pos.x / SPAWN_DISTANCE);
     const chunkY = Math.floor(s.player.pos.y / SPAWN_DISTANCE);
     
     // Expanded dynamic generation to match start (radius 2)
+    // Throttle generation slightly? No, seamless world needs this check
     for (let x = chunkX - 2; x <= chunkX + 2; x++) {
       for (let y = chunkY - 2; y <= chunkY + 2; y++) {
-        const newEnts = PhysicsEngine.generateChunk(x, y, SPAWN_DISTANCE);
+        const newEnts = PhysicsEngine.generateChunk(x, y, SPAWN_DISTANCE, s.difficulty);
         if (newEnts.length > 0) s.entities.push(...newEnts);
       }
-    }
-
-    if (s.entities.length > 400) {
-       s.entities = s.entities.filter(e => 
-           e.persistent || 
-           e.isAiGenerated || 
-           e.type === EntityType.BEAM ||
-           PhysicsEngine.dist(s.player.pos, e.pos) < CHUNK_RENDER_DISTANCE * 2
-       );
     }
 
     // 2. Physics Sub-stepping
@@ -383,6 +534,7 @@ export const GameCanvas: React.FC = () => {
 
     // --- Special Entity Updates (Beams) ---
     const activeEntities: Entity[] = [];
+    
     s.entities.forEach(e => {
         if (e.type === EntityType.BEAM) {
             if (e.expiresAt && e.expiresAt < now) {
@@ -391,7 +543,20 @@ export const GameCanvas: React.FC = () => {
             }
             
             // Check Collision if active
-            if (e.activationTime && now >= e.activationTime) {
+            const isActive = e.activationTime && now >= e.activationTime;
+            
+            // TRACKING LOGIC (Hard Mode Only)
+            // While not active (warmup), aim at player
+            if (!isActive && s.difficulty === Difficulty.HARD) {
+                const angle = Math.atan2(s.player.pos.y - e.pos.y, s.player.pos.x - e.pos.x);
+                const length = 3000;
+                e.beamEnd = {
+                    x: e.pos.x + Math.cos(angle) * length,
+                    y: e.pos.y + Math.sin(angle) * length
+                };
+            }
+
+            if (isActive) {
                 // Fire sound trigger
                 if (!e.hasFired) {
                     AudioEngine.playBeamFire();
@@ -405,12 +570,31 @@ export const GameCanvas: React.FC = () => {
                 
                 // Beam width approx 10px visual, so radius 5. Player Radius 12.
                 if (dist < s.player.radius + 5) {
-                    s.lost = true;
-                    setLost(true);
-                    setFinalTime(Date.now() - s.startTime);
-                    AudioEngine.playLose();
-                    s.particles.push(...PhysicsEngine.createExplosion(s.player.pos, 50, '#ef4444'));
-                    if (typeof navigator.vibrate === 'function') navigator.vibrate([500]);
+                    if (s.shieldActive) {
+                        // SHIELD BLOCK
+                        s.shieldBlockTime = now; // Trigger visual shine
+                        
+                        AudioEngine.playShieldBlock();
+                        if (typeof navigator.vibrate === 'function') navigator.vibrate(50);
+                        
+                        // Visual effect
+                        if (Math.random() > 0.5) {
+                           s.particles.push(...PhysicsEngine.createExplosion(s.player.pos, 5, COLORS.shield));
+                        }
+
+                        // REVERTED LOGIC: Direct force application (50% of base)
+                        const dir = PhysicsEngine.vecNorm(PhysicsEngine.vecSub(s.player.pos, e.pos));
+                        s.player.vel = PhysicsEngine.vecAdd(s.player.vel, PhysicsEngine.vecMult(dir, 5));
+
+                    } else {
+                        // DEATH
+                        s.lost = true;
+                        setLost(true);
+                        setFinalTime(Date.now() - s.startTime);
+                        AudioEngine.playLose();
+                        s.particles.push(...PhysicsEngine.createExplosion(s.player.pos, 50, '#ef4444'));
+                        if (typeof navigator.vibrate === 'function') navigator.vibrate([500]);
+                    }
                 }
             }
             activeEntities.push(e);
@@ -419,7 +603,6 @@ export const GameCanvas: React.FC = () => {
         }
     });
     s.entities = activeEntities;
-
 
     // 3. Handle Events (Collisions / Collections)
     const uniqueCollected = [...new Set(accumulatedCollected)];
@@ -466,8 +649,8 @@ export const GameCanvas: React.FC = () => {
                   restitution: 0,
                   static: true,
                   persistent: false,
-                  activationTime: now + 400, // 400ms warning
-                  expiresAt: now + 1000, // Lasts 1s total (600ms lethal)
+                  activationTime: now + 500, // 500ms warning for tracking
+                  expiresAt: now + 1100, // Lasts 1.1s total (600ms lethal)
                   hasFired: false
               });
               // Charge sound simulation
@@ -521,8 +704,17 @@ export const GameCanvas: React.FC = () => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const width = canvas.width;
-    const height = canvas.height;
+    // Handle High DPI
+    const dpr = window.devicePixelRatio || 1;
+    // We already set width/height with DPR in resize, so we need to ensure we don't double scale
+    // However, usually we set canvas.width = logicalWidth * dpr, and then ctx.scale(dpr, dpr).
+    // But since we clearRect every frame, we need to handle the transform.
+    // Reset transform to identity then apply DPR scale
+    ctx.resetTransform();
+    ctx.scale(dpr, dpr);
+
+    const width = canvas.width / dpr;
+    const height = canvas.height / dpr;
     const cx = width / 2;
     const cy = height / 2;
     const cam = camera.current;
@@ -645,13 +837,17 @@ export const GameCanvas: React.FC = () => {
       ctx.rotate((entity.rotation * Math.PI) / 180);
       ctx.fillStyle = entity.color;
 
+      // PERFORMANCE OPTIMIZATION: Only use shadows for Hit State, Goal, or Bumpers/Accelerators
+      // General AI walls/obstacles are too numerous for shadowBlur
       if (entity.isHit) {
           ctx.shadowBlur = 50;
           ctx.shadowColor = '#ffffff';
-      } else if (entity.type === EntityType.BUMPER || entity.type === EntityType.ACCELERATOR || entity.type === EntityType.GOAL || entity.isAiGenerated) {
-        ctx.shadowBlur = entity.isAiGenerated ? 20 : 15;
+      } else if (entity.type === EntityType.BUMPER || entity.type === EntityType.ACCELERATOR || entity.type === EntityType.GOAL) {
+        // Special entities get shadows
+        ctx.shadowBlur = 15;
         ctx.shadowColor = entity.color;
       }
+      // Note: AI walls intentionally have no shadow to save huge GPU overhead
       
       if (entity.type === EntityType.GOAL) {
          const time = Date.now() * 0.002;
@@ -675,6 +871,21 @@ export const GameCanvas: React.FC = () => {
              // Pulse Opacity
              if (entity.isHit) {
                  ctx.fillStyle = '#FFFFFF';
+
+                 // Added Sparkle Effect
+                 if (Math.random() > 0.3) {
+                     ctx.save();
+                     // Random sparkle position relative to center, slightly larger than box
+                     const sx = (Math.random() - 0.5) * (entity.width + 10);
+                     const sy = (Math.random() - 0.5) * (entity.height + 10);
+                     ctx.translate(sx, sy);
+                     ctx.rotate(Math.random() * Math.PI);
+                     ctx.fillStyle = Math.random() > 0.5 ? '#fff' : '#fcd34d'; // White or Amber-300
+                     ctx.globalAlpha = Math.random();
+                     const size = Math.random() * 4 + 1;
+                     ctx.fillRect(-size/2, -size/2, size, size);
+                     ctx.restore();
+                 }
              } else {
                  ctx.globalAlpha = 0.9 + Math.sin(time * 0.01) * 0.1;
              }
@@ -693,8 +904,8 @@ export const GameCanvas: React.FC = () => {
                 ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
                 ctx.fillRect(-entity.width/2, -entity.height/2 + scanY, entity.width, 10);
                 
-                // Random static interference
-                if (Math.random() > 0.9) {
+                // Random static interference (Reduced frequency for performance)
+                if (Math.random() > 0.95) {
                     ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
                     const h = Math.random() * 4 + 1;
                     const y = (Math.random() - 0.5) * entity.height;
@@ -717,9 +928,14 @@ export const GameCanvas: React.FC = () => {
     const p = state.current.player;
     ctx.save();
     ctx.translate(p.pos.x, p.pos.y);
-    ctx.fillStyle = p.color;
-    ctx.shadowBlur = 20;
-    ctx.shadowColor = p.color;
+    
+    // Check for blue shine (Block Effect)
+    const isBlockingShine = state.current.shieldBlockTime && (Date.now() - state.current.shieldBlockTime < 1000);
+    
+    ctx.fillStyle = isBlockingShine ? '#67e8f9' : p.color; // Flash lighter cyan
+    ctx.shadowBlur = isBlockingShine ? 50 : 20;
+    ctx.shadowColor = isBlockingShine ? '#22d3ee' : p.color; // Intense Cyan 400
+
     ctx.beginPath();
     ctx.arc(0, 0, p.radius, 0, Math.PI * 2);
     ctx.fill();
@@ -729,8 +945,31 @@ export const GameCanvas: React.FC = () => {
     ctx.fill();
     ctx.restore();
 
-    // Particles
+    // Shield Visuals
+    if (state.current.shieldActive) {
+        ctx.save();
+        ctx.translate(p.pos.x, p.pos.y);
+        ctx.beginPath();
+        ctx.arc(0, 0, p.radius + 8, 0, Math.PI * 2);
+        ctx.strokeStyle = COLORS.shield;
+        ctx.lineWidth = 3;
+        ctx.shadowColor = COLORS.shield;
+        ctx.shadowBlur = 15;
+        ctx.stroke();
+        
+        ctx.globalAlpha = 0.2;
+        ctx.fillStyle = COLORS.shield;
+        ctx.fill();
+        ctx.restore();
+    }
+
+    // Particles (Optimized)
+    // Use additive blending for "glow" without expensive shadowBlur
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
     state.current.particles.forEach(part => {
+      // Avoid repetitive ctx.save/restore inside loop if possible, 
+      // but alpha changes per particle, so we keep local save for safety but rely on lighter blend for fx
       ctx.save();
       ctx.globalAlpha = part.life;
       ctx.fillStyle = part.color;
@@ -740,6 +979,7 @@ export const GameCanvas: React.FC = () => {
       ctx.fill();
       ctx.restore();
     });
+    ctx.restore();
 
     ctx.restore();
 
@@ -756,7 +996,15 @@ export const GameCanvas: React.FC = () => {
   }, [update, draw]);
 
   useEffect(() => {
-    const resize = () => { if (canvasRef.current) { canvasRef.current.width = window.innerWidth; canvasRef.current.height = window.innerHeight; } };
+    const resize = () => { 
+        if (canvasRef.current) { 
+            const dpr = window.devicePixelRatio || 1;
+            canvasRef.current.width = window.innerWidth * dpr; 
+            canvasRef.current.height = window.innerHeight * dpr; 
+            canvasRef.current.style.width = `${window.innerWidth}px`;
+            canvasRef.current.style.height = `${window.innerHeight}px`;
+        } 
+    };
     window.addEventListener('resize', resize);
     resize();
     return () => window.removeEventListener('resize', resize);
@@ -814,6 +1062,50 @@ export const GameCanvas: React.FC = () => {
 
       <div className="absolute top-6 right-6 flex flex-col items-end gap-2 pointer-events-auto">
         <div className="flex items-center gap-2">
+            <div className="relative group">
+                <button 
+                onClick={activateShield}
+                disabled={shieldCooldownRatio > 0}
+                className={`w-12 h-12 rounded-full border-2 flex items-center justify-center font-black text-lg transition-all
+                    ${shieldCooldownRatio > 0 
+                        ? 'border-slate-700 bg-slate-800 text-slate-500' 
+                        : 'border-cyan-400 bg-cyan-900/50 text-cyan-400 shadow-[0_0_15px_rgba(34,211,238,0.5)] hover:bg-cyan-800'}`}
+                >
+                    O
+                </button>
+                {shieldCooldownRatio > 0 && (
+                    <svg className="absolute top-0 left-0 w-12 h-12 -rotate-90 pointer-events-none">
+                        <circle cx="24" cy="24" r="11" fill="none" stroke="#334155" strokeWidth="22" />
+                        <circle 
+                            cx="24" cy="24" r="11" fill="none" stroke="#0f172a" strokeWidth="22" 
+                            strokeDasharray={69}
+                            strokeDashoffset={69 * (1 - shieldCooldownRatio)}
+                            className="transition-all duration-100 ease-linear"
+                        />
+                    </svg>
+                )}
+                 <div className="absolute top-full mt-1 right-0 text-[10px] text-slate-400 whitespace-nowrap opacity-0 group-hover:opacity-100 transition">
+                    SHIELD (0.5s)
+                </div>
+            </div>
+
+            {/* Brake Button (I) Visual */}
+            <div className="relative group">
+                <button 
+                onClick={activateBrake}
+                disabled={brakingActive}
+                className={`w-12 h-12 rounded-full border-2 flex items-center justify-center font-black text-lg transition-all
+                    ${brakingActive 
+                        ? 'border-slate-700 bg-slate-800 text-slate-500' 
+                        : 'border-white bg-white/10 text-white shadow-[0_0_15px_rgba(255,255,255,0.3)] hover:bg-white/20'}`}
+                >
+                    I
+                </button>
+                 <div className="absolute top-full mt-1 right-0 text-[10px] text-slate-400 whitespace-nowrap opacity-0 group-hover:opacity-100 transition">
+                    AIR BRAKE
+                </div>
+            </div>
+
             <button 
                onClick={toggleDifficulty}
                className={`px-3 py-2 text-xs font-bold rounded-lg border border-slate-700 transition ${difficulty === Difficulty.HARD ? 'bg-red-900 text-red-200 shadow-[0_0_10px_rgba(239,68,68,0.5)]' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}

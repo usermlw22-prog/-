@@ -1,3 +1,4 @@
+
 export class AudioEngine {
   private static ctx: AudioContext | null = null;
   private static masterGain: GainNode | null = null;
@@ -227,5 +228,36 @@ export class AudioEngine {
     subGain.connect(this.masterGain);
     subOsc.start(now);
     subOsc.stop(now + 0.3);
+  }
+
+  static playShieldActivate() {
+    this.resume();
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(400, now);
+    osc.frequency.linearRampToValueAtTime(800, now + 0.1);
+    
+    gain.gain.setValueAtTime(0.3, now);
+    gain.gain.linearRampToValueAtTime(0, now + 0.3);
+    
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.3);
+  }
+
+  static playShieldBlock() {
+     this.resume();
+     if (!this.ctx || !this.masterGain) return;
+     const now = this.ctx.currentTime;
+     
+     // Metallic ping
+     this.playTone(1200, 'square', now, 0.1, 0.2);
+     this.playTone(600, 'sine', now, 0.2, 0.4);
   }
 }

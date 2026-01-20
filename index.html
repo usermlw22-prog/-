@@ -1,10 +1,30 @@
+
 <!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
-    <title>Neon Zen Bounce</title>
+    
+    <!-- SEO & Social Sharing -->
+    <title>Neon Zen Bounce | Physics Pinball</title>
+    <meta name="description" content="A stress-relief physics pinball game set in an infinite open world. Launch, bounce, and survive." />
+    <meta name="theme-color" content="#0f172a" />
+    
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://neon-zen-bounce.vercel.app/" />
+    <meta property="og:title" content="Neon Zen Bounce" />
+    <meta property="og:description" content="Relaxing yet challenging physics pinball in an infinite neon world." />
+    <meta property="og:image" content="https://images.unsplash.com/photo-1550745165-9bc0b252726f?auto=format&fit=crop&q=80&w=1200" />
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:title" content="Neon Zen Bounce" />
+    <meta property="twitter:description" content="Relaxing yet challenging physics pinball in an infinite neon world." />
+    
+    <!-- Tailwind via CDN for quick prototyping (Vite will bundle this in production if configured with PostCSS, but keeping CDN ensures compatibility if run raw) -->
     <script src="https://cdn.tailwindcss.com"></script>
+    
     <style>
       body, html { margin: 0; padding: 0; overflow: hidden; background: #0f172a; touch-action: none; }
       canvas { display: block; }
@@ -12,8 +32,10 @@
   <script type="importmap">
 {
   "imports": {
+    "vite": "https://esm.sh/vite@^7.3.1",
     "react/": "https://esm.sh/react@^19.2.3/",
     "react": "https://esm.sh/react@^19.2.3",
+    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2",
     "react-dom/": "https://esm.sh/react-dom@^19.2.3/"
   }
 }
@@ -21,5 +43,6 @@
 </head>
   <body>
     <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
   </body>
 </html>

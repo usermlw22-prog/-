@@ -1,3 +1,4 @@
+
 export const GRAVITY = 0.15;
 export const FRICTION = 0.99;
 export const PLAYER_RADIUS = 12;
@@ -7,6 +8,9 @@ export const CHUNK_SIZE = 8; // Tiles per chunk (800x800 pixels)
 export const AI_SPAWN_INTERVAL = 1500; // ms
 export const AI_OBSTACLE_LIFETIME = 4000; // ms
 export const GAME_DURATION = 300000; // 5 minutes in ms
+
+export const SHIELD_DURATION = 500; // 0.5 seconds
+export const SHIELD_COOLDOWN = 5000; // 5 seconds
 
 // Zone Radii (1 meter approx 10 units based on UI scale)
 export const ZONE_DEVIL_RADIUS = 3000; // 300m
@@ -22,6 +26,7 @@ export const COLORS = {
   goal: '#e879f9',    // Fuchsia 400
   aiWall: '#ef4444',  // Red 500
   trail: 'rgba(56, 189, 248, 0.2)',
+  shield: '#22d3ee',  // Cyan 400
 };
 
 export const PARTICLE_COLORS = [

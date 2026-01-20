@@ -1,3 +1,4 @@
+
 export interface Vector {
   x: number;
   y: number;
@@ -75,4 +76,12 @@ export interface GameState {
   startTime: number; // Add start time
   lastAiSpawnTime: number;
   difficulty: Difficulty;
+  // Shield State
+  shieldActive: boolean;
+  shieldExpiresAt: number;
+  shieldCooldownEndsAt: number;
+  shieldBlockTime: number;
+  // Ability State
+  braking: boolean;
+  brakeEndTime: number;
 }

@@ -1,8 +1,9 @@
+
 import { Entity, EntityType, Particle, Vector, Difficulty } from '../types';
 import { GRAVITY, FRICTION, COLORS, PARTICLE_COLORS, AI_OBSTACLE_LIFETIME } from '../constants';
 
 export class PhysicsEngine {
-  // Vector Math Helpers
+  // Vector Math Helpers (Kept for external usage, but manually inlined in hot loops)
   static vecAdd(v1: Vector, v2: Vector): Vector { return { x: v1.x + v2.x, y: v1.y + v2.y }; }
   static vecSub(v1: Vector, v2: Vector): Vector { return { x: v1.x - v2.x, y: v1.y - v2.y }; }
   static vecMult(v: Vector, s: number): Vector { return { x: v.x * s, y: v.y * s }; }
@@ -27,33 +28,45 @@ export class PhysicsEngine {
   // Procedural Generation State
   static generatedChunks: Set<string> = new Set();
   
+  static clearChunks() {
+    this.generatedChunks.clear();
+  }
+
+  static pruneChunks(playerPos: Vector, chunkSize: number, renderDist: number) {
+    const pCx = Math.floor(playerPos.x / chunkSize);
+    const pCy = Math.floor(playerPos.y / chunkSize);
+    const range = Math.ceil(renderDist / chunkSize) + 2; // Keep chunks within render distance + buffer
+
+    for (const key of this.generatedChunks) {
+      const [cx, cy] = key.split(',').map(Number);
+      if (Math.abs(cx - pCx) > range || Math.abs(cy - pCy) > range) {
+        this.generatedChunks.delete(key);
+      }
+    }
+  }
+  
   // Goal Position Configuration
   static GOAL_POS = { x: 0, y: -10000 }; // Center of chunk 0, -13 approx (1000m distance)
 
   static spawnAiObstacle(playerPos: Vector, playerVel: Vector, difficulty: Difficulty): Entity[] {
     // 1. Calculate direction to goal
-    const toGoal = this.vecSub(this.GOAL_POS, playerPos);
-    const distToGoal = this.vecMag(toGoal);
+    const dx = this.GOAL_POS.x - playerPos.x;
+    const dy = this.GOAL_POS.y - playerPos.y;
+    const distToGoal = Math.sqrt(dx * dx + dy * dy);
     
-    // Don't spawn if too close to goal (would be annoying/glitchy)
+    // Don't spawn if too close to goal
     if (distToGoal < 400) return [];
 
-    const dir = this.vecNorm(toGoal);
+    const dirX = dx / distToGoal;
+    const dirY = dy / distToGoal;
 
     // --- Distance Calculation (X = 0.5v) ---
-    // Velocity is pixels/frame. 
-    // We convert to pixels/second approx by * 60 for the formula to produce meaningful game distances.
-    // Formula: Spawn Distance = 0.5 * Velocity(px/s)
-    const speedPxPerSec = this.vecMag(playerVel) * 60;
+    const speed = Math.sqrt(playerVel.x * playerVel.x + playerVel.y * playerVel.y);
+    const speedPxPerSec = speed * 60;
     const formulaDist = speedPxPerSec * 0.5;
     
-    // Apply a minimum safety floor (e.g. 350px) so it doesn't spawn on top of player at low speeds
-    // But primarily respect the 0.5v scaling at operational speeds.
     const spawnDist = Math.max(350, formulaDist);
 
-    // 2. Base Parameters for Generation
-    // We calculate the "Target Area" based on what a Normal mode wall would be.
-    // This ensures conservation of mass/area while allowing shape flexibility.
     const normalWidth = 150 + Math.random() * 100;
     const normalThickness = 60;
     const targetArea = normalWidth * normalThickness;
@@ -61,63 +74,47 @@ export class PhysicsEngine {
     const entities: Entity[] = [];
 
     if (difficulty === Difficulty.HARD) {
-        // Hard Mode: 3 Independent blocks optimized for BLOCKING
-        // Strategy: Maximize width perpendicular to player path
-        const numBlocks = 3;
-        const perpDir = { x: -dir.y, y: dir.x };
+        // Hard Mode: 3 Independent blocks
+        const perpX = -dirY;
+        const perpY = dirX;
         
-        // A. Generate Random Proportions - FORCE WIDE SHAPES
         const shapes: {w: number, h: number}[] = [];
         let totalShapeArea = 0;
         
-        for (let i = 0; i < numBlocks; i++) {
-             // Aspect ratio (w/h) from 3.0 to 8.0 (Very wide barriers)
-             // This maximizes the projection on the perpendicular axis
+        for (let i = 0; i < 3; i++) {
              const aspect = 3.0 + Math.random() * 5.0; 
-             
-             // Balanced weights so no block is too small
              const weight = 0.8 + Math.random() * 0.4; 
-             
              const h = Math.sqrt(weight / aspect); 
              const w = h * aspect; 
-             
              shapes.push({w, h});
              totalShapeArea += w * h;
         }
 
-        // B. Global Scale
         const scale = Math.sqrt(targetArea / totalShapeArea);
-
-        // Base Rotation: Perpendicular to the path to maximize blocking area
-        const angleRad = Math.atan2(dir.y, dir.x);
+        const angleRad = Math.atan2(dirY, dirX);
         const baseRotationDeg = (angleRad * 180 / Math.PI) + 90;
 
-        for (let i = 0; i < numBlocks; i++) {
+        for (let i = 0; i < 3; i++) {
              const finalW = shapes[i].w * scale;
              const finalH = shapes[i].h * scale;
 
-             // C. Positioning
-             // Tight forward grouping to form a single "wall" layer
              const forwardDist = 400 + Math.random() * 60; 
-             
-             // Lateral Spread: Wide enough to cover the screen width mostly
-             // Spread range 200 means +/- 200 lateral offset (400 total width range)
              const spreadRange = 200; 
              const lateralOffset = (Math.random() - 0.5) * 2 * spreadRange;
 
-             const anchorPos = this.vecAdd(playerPos, this.vecMult(dir, forwardDist));
-             const pos = this.vecAdd(anchorPos, this.vecMult(perpDir, lateralOffset));
+             const anchorX = playerPos.x + dirX * forwardDist;
+             const anchorY = playerPos.y + dirY * forwardDist;
+             
+             const posX = anchorX + perpX * lateralOffset;
+             const posY = anchorY + perpY * lateralOffset;
 
-             // D. Rotation
-             // Constrained rotation: Roughly perpendicular +/- 45 degrees
-             // This prevents them from turning sideways and becoming thin pillars
              const rotationJitter = (Math.random() - 0.5) * 90;
              const rotation = baseRotationDeg + rotationJitter;
 
              entities.push({
                 id: `ai_${Date.now()}_${i}_${Math.random()}`,
                 type: EntityType.WALL,
-                pos: pos,
+                pos: { x: posX, y: posY },
                 vel: { x: 0, y: 0 },
                 radius: 0,
                 width: finalW,
@@ -125,19 +122,19 @@ export class PhysicsEngine {
                 rotation: rotation,
                 color: COLORS.aiWall,
                 mass: Infinity,
-                restitution: 1.3, // Extra bounce for chaos
+                restitution: 1.3,
                 static: true,
                 isAiGenerated: true,
                 expiresAt: Date.now() + AI_OBSTACLE_LIFETIME
              });
         }
     } else {
-        // Normal Mode: Single massive block directly ahead
+        // Normal Mode
         const finalDist = spawnDist + (Math.random() * 100 - 50); 
-        const centerPos = this.vecAdd(playerPos, this.vecMult(dir, finalDist));
+        const centerX = playerPos.x + dirX * finalDist;
+        const centerY = playerPos.y + dirY * finalDist;
 
-        // Predictable alignment (perpendicular to path)
-        const angleRad = Math.atan2(dir.y, dir.x);
+        const angleRad = Math.atan2(dirY, dirX);
         const baseRotationRad = angleRad + Math.PI / 2;
         const randomTilt = (Math.random() - 0.5) * 0.5; 
         const rotation = (baseRotationRad + randomTilt) * (180 / Math.PI);
@@ -145,7 +142,7 @@ export class PhysicsEngine {
         entities.push({
             id: `ai_${Date.now()}_${Math.random()}`,
             type: EntityType.WALL,
-            pos: centerPos,
+            pos: { x: centerX, y: centerY },
             vel: { x: 0, y: 0 },
             radius: 0,
             width: normalWidth,
@@ -163,7 +160,7 @@ export class PhysicsEngine {
     return entities;
   }
 
-  static generateChunk(chunkX: number, chunkY: number, chunkSize: number): Entity[] {
+  static generateChunk(chunkX: number, chunkY: number, chunkSize: number, difficulty: Difficulty = Difficulty.NORMAL): Entity[] {
     const key = `${chunkX},${chunkY}`;
     if (this.generatedChunks.has(key)) return [];
     this.generatedChunks.add(key);
@@ -172,10 +169,7 @@ export class PhysicsEngine {
     const baseX = chunkX * chunkSize;
     const baseY = chunkY * chunkSize;
 
-    // Special Case: Goal Chunk (0, -13) -> centered around y=-10000
-    // Generate goal entities, but DO NOT return early so we still get terrain
     if (chunkX === 0 && chunkY === -13) {
-       // Clear area for goal
        entities.push({
           id: 'FINAL_GOAL',
           type: EntityType.GOAL,
@@ -187,10 +181,9 @@ export class PhysicsEngine {
           mass: Infinity,
           restitution: 0,
           static: true,
-          persistent: true // Never delete
+          persistent: true 
        });
        
-       // Decorative pillars around goal
        [-150, 150].forEach((offset, i) => {
           entities.push({
             id: `goal_pillar_${i}`,
@@ -205,15 +198,19 @@ export class PhysicsEngine {
             mass: Infinity,
             restitution: 0.5,
             static: true,
-            persistent: true // Never delete
+            persistent: true
           });
        });
     }
 
-    // Standard Procedural Generation
     const seed = Math.abs(Math.sin(chunkX * 12.9898 + chunkY * 78.233) * 43758.5453);
-    // Reverted base count from +3 back to +2
-    const count = Math.floor((seed % 1) * 5) + 2; 
+    
+    let minCount = 2;
+    if (difficulty === Difficulty.HARD) {
+        minCount = 3;
+    }
+
+    const count = Math.floor((seed % 1) * 5) + minCount; 
 
     for (let i = 0; i < count; i++) {
       const subSeed = Math.abs(Math.sin(i * 12.9898 + seed) * 43758.5453);
@@ -222,9 +219,11 @@ export class PhysicsEngine {
       const posX = baseX + (subSeed * 1000) % chunkSize;
       const posY = baseY + ((subSeed * 10000) % chunkSize);
 
-      // Don't spawn too close to 0,0 (start) or goal
       if (Math.abs(posX) < 300 && Math.abs(posY) < 300) continue;
-      if (this.dist({x: posX, y: posY}, this.GOAL_POS) < 300) continue;
+      // Inline distance check
+      const dGx = posX - this.GOAL_POS.x;
+      const dGy = posY - this.GOAL_POS.y;
+      if (Math.sqrt(dGx * dGx + dGy * dGy) < 300) continue;
 
       let type = EntityType.WALL;
       let width = 50 + (subSeed * 100) % 150;
@@ -286,63 +285,94 @@ export class PhysicsEngine {
     const collected: string[] = [];
     let won = false;
 
+    // --- OPTIMIZATION: Inline vector math to avoid GC pressure ---
+
     // Apply gravity
     player.vel.y += GRAVITY * dt;
     
-    // Scale friction correctly with dt
-    player.vel = this.vecMult(player.vel, Math.pow(FRICTION, dt));
+    // Friction
+    const frictionFactor = Math.pow(FRICTION, dt);
+    player.vel.x *= frictionFactor;
+    player.vel.y *= frictionFactor;
 
     // Predict next position
-    const nextPos = this.vecAdd(player.pos, this.vecMult(player.vel, dt));
+    // const nextPos = this.vecAdd(player.pos, this.vecMult(player.vel, dt));
+    let nextX = player.pos.x + player.vel.x * dt;
+    let nextY = player.pos.y + player.vel.y * dt;
 
     // Resolve Collisions
     for (const entity of entities) {
-      // Beams are handled outside in GameCanvas update for specific logic
       if (entity.type === EntityType.BEAM) continue; 
 
       if (entity.type === EntityType.GOAL) {
-          const dist = this.dist(nextPos, entity.pos);
-          if (dist < entity.radius) { // Simple overlap check
+          // dist = sqrt((x1-x2)^2 + (y1-y2)^2)
+          const dx = nextX - entity.pos.x;
+          const dy = nextY - entity.pos.y;
+          // Avoid sqrt if checking < radius (check squared)
+          if ((dx*dx + dy*dy) < (entity.radius * entity.radius)) {
               won = true;
           }
           continue;
       }
 
       if (entity.type === EntityType.ORB) {
-         const dist = this.dist(nextPos, entity.pos);
-         if (dist < player.radius + entity.radius) {
+         const dx = nextX - entity.pos.x;
+         const dy = nextY - entity.pos.y;
+         const minDist = player.radius + entity.radius;
+         if ((dx*dx + dy*dy) < (minDist * minDist)) {
             collected.push(entity.id);
          }
          continue;
       }
 
       if (entity.type === EntityType.BUMPER) {
-        const dist = this.dist(nextPos, entity.pos);
+        const dx = nextX - entity.pos.x;
+        const dy = nextY - entity.pos.y;
+        const distSq = dx*dx + dy*dy;
         const minDist = player.radius + entity.radius;
 
-        if (dist < minDist) {
-          const normal = this.vecNorm(this.vecSub(nextPos, entity.pos));
-          const penetration = minDist - dist;
-          nextPos.x += normal.x * penetration;
-          nextPos.y += normal.y * penetration;
+        if (distSq < minDist * minDist) {
+          const dist = Math.sqrt(distSq);
+          
+          // Normal: dx/dist, dy/dist
+          const nx = dx / dist;
+          const ny = dy / dist;
 
-          const relVel = this.vecSub(player.vel, entity.vel);
-          const velAlongNormal = this.vecDot(relVel, normal);
+          const penetration = minDist - dist;
+          nextX += nx * penetration;
+          nextY += ny * penetration;
+
+          // Relative Velocity: (p.vx - e.vx)
+          const rvx = player.vel.x - entity.vel.x;
+          const rvy = player.vel.y - entity.vel.y;
+
+          // Velocity along normal: dot product
+          const velAlongNormal = rvx * nx + rvy * ny;
 
           if (velAlongNormal < 0) {
              const j = -(1 + entity.restitution) * velAlongNormal;
-             const impulse = this.vecMult(normal, j);
-             player.vel = this.vecAdd(player.vel, impulse);
+             // Impulse: normal * j
+             player.vel.x += nx * j;
+             player.vel.y += ny * j;
              collisions.push({ entity, force: j });
           }
         }
       } else if (entity.type === EntityType.WALL || entity.type === EntityType.ACCELERATOR) {
         const rad = -entity.rotation * (Math.PI / 180);
-        const localX = Math.cos(rad) * (nextPos.x - entity.pos.x) - Math.sin(rad) * (nextPos.y - entity.pos.y);
-        const localY = Math.sin(rad) * (nextPos.x - entity.pos.x) + Math.cos(rad) * (nextPos.y - entity.pos.y);
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
 
-        const closestX = Math.max(-entity.width! / 2, Math.min(localX, entity.width! / 2));
-        const closestY = Math.max(-entity.height! / 2, Math.min(localY, entity.height! / 2));
+        const dx = nextX - entity.pos.x;
+        const dy = nextY - entity.pos.y;
+
+        // Local coordinates
+        const localX = cos * dx - sin * dy;
+        const localY = sin * dx + cos * dy;
+
+        const halfW = entity.width! / 2;
+        const halfH = entity.height! / 2;
+        const closestX = Math.max(-halfW, Math.min(localX, halfW));
+        const closestY = Math.max(-halfH, Math.min(localY, halfH));
 
         const distX = localX - closestX;
         const distY = localY - closestY;
@@ -351,37 +381,53 @@ export class PhysicsEngine {
         if (distanceSquared < player.radius * player.radius) {
           const dist = Math.sqrt(distanceSquared);
           
-          let localNormal = { x: 0, y: 0 };
+          let lnx = 0, lny = 0;
           if (dist === 0) {
-              localNormal = { x: 0, y: -1 };
+              lny = -1;
           } else {
-             localNormal = { x: distX / dist, y: distY / dist };
+             lnx = distX / dist;
+             lny = distY / dist;
           }
 
-          const worldNormal = {
-            x: Math.cos(-rad) * localNormal.x - Math.sin(-rad) * localNormal.y,
-            y: Math.sin(-rad) * localNormal.x + Math.cos(-rad) * localNormal.y,
-          };
+          // Transform normal back to world
+          // Rotation matrix transpose (inverse for rotation)
+          // For negative rad: cos(-t) = cos(t), sin(-t) = -sin(t)
+          // Actually, we use the same rotation as transforming Point -> Local?
+          // No, we need Local Vector -> World Vector. We rotated World -> Local by -angle.
+          // So we rotate Local -> World by +angle (which is -rad since rad is -rotation).
+          // Wait, previous code used:
+          // x: cos(-rad)*lx - sin(-rad)*ly
+          // y: sin(-rad)*lx + cos(-rad)*ly
+          // Let's stick to that math to ensure consistency with original behavior.
+          
+          const cosRev = Math.cos(-rad);
+          const sinRev = Math.sin(-rad);
+          
+          const wnx = cosRev * lnx - sinRev * lny;
+          const wny = sinRev * lnx + cosRev * lny;
 
           const penetration = player.radius - dist;
-          nextPos.x += worldNormal.x * penetration;
-          nextPos.y += worldNormal.y * penetration;
+          nextX += wnx * penetration;
+          nextY += wny * penetration;
 
-          const velAlongNormal = this.vecDot(player.vel, worldNormal);
+          const velAlongNormal = player.vel.x * wnx + player.vel.y * wny;
+          
           if (velAlongNormal < 0) {
              let restitution = entity.restitution;
              if (entity.type === EntityType.ACCELERATOR) restitution = 2.5; 
              
              const j = -(1 + restitution) * velAlongNormal;
-             const impulse = this.vecMult(worldNormal, j);
-             player.vel = this.vecAdd(player.vel, impulse);
+             player.vel.x += wnx * j;
+             player.vel.y += wny * j;
              collisions.push({ entity, force: j });
           }
         }
       }
     }
 
-    player.pos = nextPos;
+    player.pos.x = nextX;
+    player.pos.y = nextY;
+
     return { player, collisions, collected, won };
   }
 
